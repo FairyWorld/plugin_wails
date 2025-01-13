@@ -50,15 +50,30 @@ func main() {
         OnBeforeClose:      app.beforeClose,
         CSSDragProperty:   "--wails-draggable",
         CSSDragValue:      "drag",
-        ZoomFactor:           1.0,
-        IsZoomControlEnabled: false,
+        EnableDefaultContextMenu: false,
+        EnableFraudulentWebsiteDetection: false,
         Bind: []interface{}{
             app,
+        },
+        EnumBind: []interface{}{
+            AllWeekdays,
+        },
+        ErrorFormatter: func(err error) any { return err.Error() },
+        SingleInstanceLock: &options.SingleInstanceLock{
+          UniqueId:               "c9c8fd93-6758-4144-87d1-34bdb0a8bd60",
+          OnSecondInstanceLaunch: app.onSecondInstanceLaunch,
+        },
+        DragAndDrop: &options.DragAndDrop{
+          EnableFileDrop:       false,
+          DisableWebViewDrop:   false,
+          CSSDropProperty:      "--wails-drop-target",
+          CSSDropValue:         "drop",
         },
         Windows: &windows.Options{
             WebviewIsTransparent:              false,
             WindowIsTranslucent:               false,
             BackdropType:                      windows.Mica,
+            DisablePinchZoom:               false,
             DisableWindowIcon:                 false,
             DisableFramelessWindowDecorations: false,
             WebviewUserDataPath:               "",
@@ -72,12 +87,18 @@ func main() {
                 LightModeTitleText: windows.RGB(20, 20, 20),
                 LightModeBorder:    windows.RGB(200, 200, 200),
             },
-            // ユーザへのメッセージをカスタマイズします
-            Messages *windows.Messages
-            // OnSuspendはWindowsが省電力モードに移行した場合に呼び出されます
-            OnSuspend func()
-            // OnResumeはWindowsが省電力モードから復帰した場合に呼び出されます
-            OnResume func()
+            // ZoomFactor is the zoom factor for the WebView2. これは、Edgeのユーザによるズームインまたはズームアウトに対応するオプションです。
+            ZoomFactor:           float64,
+            // IsZoomControlEnabled enables the zoom factor to be changed by the user.
+            IsZoomControlEnabled: bool,
+            // User messages that can be customised
+            Messages: *windows.Messages
+            // OnSuspend is called when Windows enters low power mode
+            OnSuspend: func()
+            // OnResume is called when Windows resumes from low power mode
+            OnResume: func(),
+            // Disable GPU hardware acceleration for the webview
+            WebviewGpuDisabled: false,
         },
         Mac: &mac.Options{
             TitleBar: &mac.TitleBar{
@@ -87,6 +108,8 @@ func main() {
                 FullSizeContent:            false,
                 UseToolbar:                 false,
                 HideToolbarSeparator:       true,
+                OnFileOpen: app.onFileOpen,
+                      OnUrlOpen:  app.onUrlOpen,
             },
             Appearance:           mac.NSAppearanceNameDarkAqua,
             WebviewIsTransparent: true,
@@ -100,6 +123,8 @@ func main() {
         Linux: &linux.Options{
             Icon: icon,
             WindowIsTranslucent: false,
+            WebviewGpuPolicy: linux.WebviewGpuPolicyAlways,
+            ProgramName: "wails"
         },
         Debug: options.Debug{
             OpenInspectorOnStartup: false,
@@ -231,12 +256,12 @@ AssetServerの固有オプションを定義します。 静的なアセット�
 | PATCH                   | ✅   | ✅   | ✅ [^1] |
 | DELETE                  | ✅   | ✅   | ✅ [^1] |
 | Request Headers         | ✅   | ✅   | ✅ [^1] |
-| Request Body            | ✅   | ✅   | ❌      |
-| Request Body Streaming  | ❌   | ❌   | ❌      |
+| Request Body            | ✅   | ✅   | ✅ [^2] |
+| Request Body Streaming  | ✅   | ✅   | ✅ [^2] |
 | Response StatusCodes    | ✅   | ✅   | ✅ [^1] |
 | Response Headers        | ✅   | ✅   | ✅ [^1] |
 | Response Body           | ✅   | ✅   | ✅      |
-| Response Body Streaming | ❌   | ❌   | ✅      |
+| Response Body Streaming | ❌   | ✅   | ✅      |
 | WebSockets              | ❌   | ❌   | ❌      |
 | HTTP Redirects 30x      | ✅   | ❌   | ❌      |
 
@@ -260,6 +285,12 @@ nilがセットされている場合、GETリクエストに常に[Handler](#han
 
 - GETリクエスト: `http.StatusNotFound`
 - その他のリクエスト: `http.StatusMethodNotAllowed`
+
+:::info
+
+This does not work with vite v5.0.0+ and wails v2 due to changes in vite. Changes are planned in v3 to support similar functionality under vite v5.0.0+. If you need this feature, stay with vite v4.0.0+. See [issue 3240](https://github.com/wailsapp/wails/issues/3240) for details
+
+:::
 
 注意: フロントエンド側の開発サーバと組み合わせて使用すると、一部制限がかかる場合があります。 Viteは、拡張子を含まないパスに対して、常にindex.htmlを返します。
 
@@ -356,23 +387,110 @@ func (b *App) beforeClose(ctx context.Context) (prevent bool) {
 
 名前: CSSDragValue<br/> データ型: `string`
 
-### ZoomFactor
+### EnableDefaultContextMenu
 
-名前: ZoomFactor<br/> データ型: `float64`
+EnableDefaultContextMenuは、本番環境において、ブラウザのデフォルトコンテキストメニューを有効にします。
 
-WebView2の拡大率を定義します。 これは、Edgeのユーザによるズームインまたはズームアウトに対応するオプションです。
+By default, the browser's default context-menu is only available in development and in a `-debug` [build](../reference/cli.mdx#build) along with the devtools inspector, Using this option you can enable the default context-menu in `production` while the devtools inspector won't be available unless the `-devtools` build flag is used.
 
-### IsZoomControlEnabled
+このオプションを有効にすると、デフォルトでは、テキストに関するコンテキスト(切り取り/コピー/貼り付け) のみがコンテキストメニューに表示されます。この動作をオーバーライドするには、`--default-contextmenu`というCSSプロパティを任意のHTML要素(`body`含む) で以下の値と共に使用してください:
 
-名前: IsZoomControlEnabled<br/> データ型: `bool`
+| CSSスタイル                        | 動作                                                                                                                       |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `--default-contextmenu: auto;` | (**デフォルト**) 次の場合にのみデフォルトのコンテキストメニューを表示します:<br/> contentEditableがtrueである、またはテキストが選択されている、またはinput要素/textarea要素であるとき |
+| `--default-contextmenu: show;` | 常にデフォルトのコンテキストメニューを表示します                                                                                                 |
+| `--default-contextmenu: hide;` | 常にデフォルトのコンテキストメニューを非表示にします                                                                                               |
 
-このオプションを有効にすると、拡大率をユーザによって変更することができます。 拡大率の変更がユーザに許可されていない間は、オプションで拡大率を設定することができますのでご注意ください (例:  キオスクアプリケーションなど)。
+このルールは通常のCSSルールと同様に継承されるため、ネストも期待どおりに動作します。
+
+:::note
+このフィルタリング機能は本番環境でのみ有効であり、開発・デバッグビルドでは、フルコンテキストメニューが常に使用できます。
+:::
+
+:::warning
+このフィルタリング機能はセキュリティ対策として使用することはできません。開発者は、画像のダウンロード、リロード、ウェブページの保存といったコマンドを含むフルコンテキストメニューが常にリークされる可能性を考慮すべきです。この点が気になる場合、開発者はデフォルトのコンテキストメニューを有効にするべきではありません。
+:::
+
+
+名前: EnableDefaultContextMenu<br/> データ型: `bool`
+
+### EnableFraudulentWebsiteDetection
+
+EnableFraudulentWebsiteDetectionは、マルウェアやフィッシング詐欺などの不正コンテンツのスキャンサービスを有効にします。 これらのサービスは、ナビゲートされたURLやその他コンテンツ情報を、アプリからAppleおよびMicrosoftのクラウドサービスに送信する可能性があります。
+
+名前: EnableFraudulentWebsiteDetection<br/> データ型: `bool`
 
 ### Bind
 
 フロントエンドにバインドする必要があるメソッドが定義された、構造体インスタンスのスライスです。
 
 名前: Bind<br/> データ型: `[]interface{}`
+
+### EnumBind
+
+A slice of Enum arrays that need to be bound to the frontend.
+
+Name: EnumBind<br/> Type: `[]interface{}`
+
+### ErrorFormatter
+
+JSからGoへ呼び出されたメソッドがエラーを返す際に、エラーをフォーマットする関数です。 返り値はJSONとして変換されます。
+
+名前: ErrorFormatter<br/> データ型: `func (error) any`
+
+### SingleInstanceLock
+
+Enables single instance locking. This means that only one instance of your application can be running at a time.
+
+Name: SingleInstanceLock<br/> Type: `*options.SingleInstanceLock`
+
+#### UniqueId
+
+This id is used to generate the mutex name on Windows and macOS and the dbus name on Linux. Use a UUID to ensure that the id is unique.
+
+Name: UniqueId<br/> Type: `string`
+
+#### OnSecondInstanceLaunch
+
+Callback that is called when a second instance of your app is launched.
+
+Name: OnSecondInstanceLaunch<br/> Type: `func(secondInstanceData SecondInstanceData)`
+
+### Drag and Drop
+
+Defines the behavior of drag and drop events on the window.
+
+Name: DragAndDrop<br/> Type: `options.DragAndDrop`
+
+#### EnableFileDrop
+
+EnableFileDrop enables wails' drag and drop functionality that returns the dropped in files' absolute paths.
+
+When it is set to `true` the [runtime methods](../reference/runtime/draganddrop.mdx) can be used. <br/> Or you can listen for the `wails:file-drop` event with [runtime EventsOn method](../reference/runtime/events.mdx#eventson) both on the Javascript and GO side to implement any functionality you would like.
+
+The event returns the coordinates of the drop and a file path slice.
+
+Name: EnableFileDrop<br/> Type: `bool`<br/> Default: `false`
+
+#### DisableWebViewDrop
+
+Disables the webview's drag and drop functionality.
+
+It can be used to prevent accidental opening of dragged in files in the webview, when there is no need for drag and drop.
+
+Name: DisableWebViewDrop<br/> Type: `bool`<br/> Default: `false`
+
+#### CSSDropProperty
+
+CSS property to test for drag and drop target elements.
+
+Name: CSSDropProperty<br/> Type: `string`<br/> Default: `--wails-drop-target`
+
+#### CSSDropValue
+
+The CSS Value that the CSSDropProperty must have to be a valid drop target. Default "drop"
+
+Name: CSSDropValue<br/> Type: `string`<br/> Default: `drop`
 
 ### Windows
 
@@ -415,6 +533,24 @@ WebView2の拡大率を定義します。 これは、Edgeのユーザによる�
 | Acrylic | [アクリル](https://learn.microsoft.com/ja-jp/windows/apps/design/style/acrylic)の効果を使用する |
 | Mica    | [マイカ](https://learn.microsoft.com/ja-jp/windows/apps/design/style/mica)の効果を使用する     |
 | Tabbed  | タブを使用する。 これはマイカに似ている背景です。                                                           |
+
+#### ZoomFactor
+
+名前: ZoomFactor<br/> データ型: `float64`
+
+WebView2の拡大率を定義します。 これは、Edgeのユーザによるズームインまたはズームアウトに対応するオプションです。
+
+#### IsZoomControlEnabled
+
+名前: IsZoomControlEnabled<br/> データ型: `bool`
+
+このオプションを有効にすると、拡大率をユーザによって変更することができます。 拡大率の変更がユーザに許可されていない間は、オプションで拡大率を設定することができますのでご注意ください (例:  キオスクアプリケーションなど)。
+
+#### DisablePinchZoom
+
+Setting this to `true` will disable pinch zoom gestures.
+
+Name: DisablePinchZoom<br/> Type: `bool`
 
 #### DisableWindowIcon
 
@@ -542,6 +678,18 @@ Windowsがローパワーモード(サスペンド/休止状態) から復帰し
 
 名前: OnResume<br/> データ型: `func()`
 
+#### WebviewGpuIsDisabled
+
+`true`に設定すると、webviewのGPUハードウェアアクセラレーションが無効化されます。
+
+名前: WebviewGpuIsDisabled<br/> データ型: `bool`
+
+#### EnableSwipeGestures
+
+Setting this to `true` will enable swipe gestures for the webview.
+
+Name: EnableSwipeGestures<br/> Type: `bool`
+
 ### Mac
 
 [Mac固有のオプション](#mac)を定義します。
@@ -637,6 +785,54 @@ Mac: &mac.Options{
 
 名前: WindowIsTranslucent<br/> データ型: `bool`
 
+#### OnFileOpen
+
+Callback that is called when a file is opened with the application.
+
+Name: OnFileOpen<br/> Type: `func(filePath string)`
+
+#### OnUrlOpen
+
+Callback that is called when a URL is opened with the application.
+
+Name: OnUrlOpen<br/> Type: `func(filePath string)`
+
+#### Preferences
+
+The Preferences struct provides the ability to configure the Webview preferences.
+
+Name: Preferences<br/> Type: [`*mac.Preferences`](#preferences-struct)
+
+##### Preferences struct
+
+You can specify the webview preferences.
+
+```go
+type Preferences struct {
+    TabFocusesLinks        u.Bool
+    TextInteractionEnabled u.Bool
+    FullscreenEnabled      u.Bool
+}
+```
+
+| 名前                     | 説明                                                                                                                                                                                                                           |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| TabFocusesLinks        | A Boolean value that indicates whether pressing the tab key changes the focus to links and form controls. [Apple Docs](https://developer.apple.com/documentation/webkit/wkpreferences/2818595-tabfocuseslinks?language=objc) |
+| TextInteractionEnabled | A Boolean value that indicates whether to allow people to select or otherwise interact with text. [Apple Docs](https://developer.apple.com/documentation/webkit/wkpreferences/3727362-textinteractionenabled?language=objc)  |
+| FullscreenEnabled      | A Boolean value that indicates whether a web view can display content full screen. [Apple Docs](https://developer.apple.com/documentation/webkit/wkpreferences/3917769-elementfullscreenenabled?language=objc)               |
+
+例:
+
+```go
+Mac: &mac.Options{
+    Preferences: &mac.Preferences{
+        TabFocusesLinks:        mac.Enabled,
+        TextInteractionEnabled: mac.Disabled,
+        FullscreenEnabled:      mac.Enabled,
+    }
+}
+```
+
 #### About
 
 "AppMenu"ロールで作成されたアプリケーションメニューの中にある"About"メニュー項目において、タイトル、メッセージ、アイコンを設定できます。
@@ -722,6 +918,28 @@ func main() {
 
 名前: WindowIsTranslucent<br/> データ型: `bool`
 
+#### WebviewGpuPolicy
+
+このオプションでは、webviewのハードウェアアクセラレーションポリシーを指定することができます。
+
+名前: WebviewGpuPolicy<br/> データ型: [`options.WebviewGpuPolicy`](#webviewgpupolicy-type)<br/> デフォルト値: `WebviewGpuPolicyAlways`
+
+##### WebviewGpuPolicy型
+
+| 値                        | 説明                                            |
+| ------------------------ | --------------------------------------------- |
+| WebviewGpuPolicyAlways   | ハードウェアアクセラレーションを常に有効にする                       |
+| WebviewGpuPolicyOnDemand | Webコンテンツからの要求に応じて、ハードウェアアクセラレーションの有効/無効を切り替える |
+| WebviewGpuPolicyNever    | ハードウェアアクセラレーションを常に無効にする                       |
+
+#### ProgramName
+
+このオプションでは、GTKのg_set_prgname() を使用し、ウィンドウマネージャのプログラム名を設定することができます。 ただし、ローカライズされた名前を設定すべきではありません。詳しくは[ドキュメント](https://docs.gtk.org/glib/func.set_prgname.html)をご覧ください。
+
+.desktopファイルが作成される際、.desktopファイルの`Name`オプションと実行ファイルのファイル名が異なる場合に、ウィンドウのグループ化およびデスクトップアイコンの表示に、本オプションは役立ちます。
+
+名前: ProgramName<br/> データ型: string<br/>
+
 ### Debug
 
 デバッグビルド時に適用される[デバッグ固有のオプション](#Debug)を定義します。
@@ -735,3 +953,4 @@ func main() {
 名前: OpenInspectorOnStartup<br/> データ型: `bool`
 
 [^1]: この機能の動作には、WebKit2GTK 2.36以上が必要となるため、機能を確実に対応させたい場合は、アプリビルド時にビルドタグ`webkit2_36`を付与してください。 これにより、アプリに必要なWebKit2GTKの最小バージョン要件が2.36に引き上げられます。
+[^2]: この機能の動作には、WebKit2GTK 2.40以上が必要となるため、機能を確実に対応させたい場合は、アプリビルド時にビルドタグ`webkit2_40`を付与してください。 これにより、アプリに必要なWebKit2GTKの最小バージョン要件が2.40に引き上げられます。
