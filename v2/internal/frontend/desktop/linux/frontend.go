@@ -4,7 +4,9 @@
 package linux
 
 /*
-#cgo linux pkg-config: gtk+-3.0 webkit2gtk-4.0
+#cgo linux pkg-config: gtk+-3.0 
+#cgo !webkit2_41 pkg-config: webkit2gtk-4.0
+#cgo webkit2_41 pkg-config: webkit2gtk-4.1
 
 #include "gtk/gtk.h"
 #include "webkit2/webkit2.h"
@@ -76,18 +78,20 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
-	"net/http"
+	"net"
 	"net/url"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 	"unsafe"
 
 	"github.com/wailsapp/wails/v2/pkg/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/assetserver/webview"
 
 	"github.com/wailsapp/wails/v2/internal/binding"
 	"github.com/wailsapp/wails/v2/internal/frontend"
@@ -96,7 +100,11 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 )
 
+var initOnce = sync.Once{}
+
 const startURL = "wails://wails/"
+
+var secondInstanceBuffer = make(chan options.SecondInstanceData, 1)
 
 type Frontend struct {
 
@@ -106,6 +114,7 @@ type Frontend struct {
 	frontendOptions *options.App
 	logger          *logger.Logger
 	debug           bool
+	devtoolsEnabled bool
 
 	// Assets
 	assets   *assetserver.AssetServer
@@ -125,18 +134,19 @@ func (f *Frontend) WindowClose() {
 	f.mainWindow.Destroy()
 }
 
-func init() {
-	runtime.LockOSThread()
-
-	// Set GDK_BACKEND=x11 if currently unset and XDG_SESSION_TYPE is unset, unspecified or x11 to prevent warnings
-	if os.Getenv("GDK_BACKEND") == "" && (os.Getenv("XDG_SESSION_TYPE") == "" || os.Getenv("XDG_SESSION_TYPE") == "unspecified" || os.Getenv("XDG_SESSION_TYPE") == "x11") {
-		_ = os.Setenv("GDK_BACKEND", "x11")
-	}
-
-	C.gtk_init(nil, nil)
-}
-
 func NewFrontend(ctx context.Context, appoptions *options.App, myLogger *logger.Logger, appBindings *binding.Bindings, dispatcher frontend.Dispatcher) *Frontend {
+	initOnce.Do(func() {
+		runtime.LockOSThread()
+
+		// Set GDK_BACKEND=x11 if currently unset and XDG_SESSION_TYPE is unset, unspecified or x11 to prevent warnings
+		if os.Getenv("GDK_BACKEND") == "" && (os.Getenv("XDG_SESSION_TYPE") == "" || os.Getenv("XDG_SESSION_TYPE") == "unspecified" || os.Getenv("XDG_SESSION_TYPE") == "x11") {
+			_ = os.Setenv("GDK_BACKEND", "x11")
+		}
+
+		if ok := C.gtk_init_check(nil, nil); ok != 1 {
+			panic(errors.New("failed to init GTK"))
+		}
+	})
 
 	result := &Frontend{
 		frontendOptions: appoptions,
@@ -150,6 +160,10 @@ func NewFrontend(ctx context.Context, appoptions *options.App, myLogger *logger.
 	if _starturl, _ := ctx.Value("starturl").(*url.URL); _starturl != nil {
 		result.startURL = _starturl
 	} else {
+		if port, _ := ctx.Value("assetserverport").(string); port != "" {
+			result.startURL.Host = net.JoinHostPort(result.startURL.Host+".localhost", port)
+		}
+
 		var bindings string
 		var err error
 		if _obfuscated, _ := ctx.Value("obfuscated").(bool); !_obfuscated {
@@ -166,21 +180,32 @@ func NewFrontend(ctx context.Context, appoptions *options.App, myLogger *logger.
 		}
 		result.assets = assets
 
-		// Start 10 processors to handle requests in parallel
-		for i := 0; i < 10; i++ {
-			go result.startRequestProcessor()
-		}
+		go result.startRequestProcessor()
 	}
 
 	go result.startMessageProcessor()
 
 	var _debug = ctx.Value("debug")
+	var _devtoolsEnabled = ctx.Value("devtoolsEnabled")
+
 	if _debug != nil {
 		result.debug = _debug.(bool)
 	}
-	result.mainWindow = NewWindow(appoptions, result.debug)
+	if _devtoolsEnabled != nil {
+		result.devtoolsEnabled = _devtoolsEnabled.(bool)
+	}
+
+	result.mainWindow = NewWindow(appoptions, result.debug, result.devtoolsEnabled)
 
 	C.install_signal_handlers()
+
+	if appoptions.Linux != nil && appoptions.Linux.ProgramName != "" {
+		prgname := C.CString(appoptions.Linux.ProgramName)
+		C.g_set_prgname(prgname)
+		C.free(unsafe.Pointer(prgname))
+	}
+
+	go result.startSecondInstanceProcessor()
 
 	return result
 }
@@ -215,6 +240,10 @@ func (f *Frontend) Run(ctx context.Context) error {
 			f.frontendOptions.OnStartup(f.ctx)
 		}
 	}()
+
+	if f.frontendOptions.SingleInstanceLock != nil {
+		SetupSingleInstance(f.frontendOptions.SingleInstanceLock.UniqueId)
+	}
 
 	f.mainWindow.Run(f.startURL.String())
 
@@ -343,6 +372,10 @@ func (f *Frontend) Quit() {
 	f.mainWindow.Quit()
 }
 
+func (f *Frontend) WindowPrint() {
+	f.ExecJS("window.print();")
+}
+
 type EventNotify struct {
 	Name string        `json:"name"`
 	Data []interface{} `json:"data"`
@@ -387,6 +420,11 @@ func (f *Frontend) processMessage(message string) {
 		return
 	}
 
+	if message == "wails:showInspector" {
+		f.mainWindow.ShowInspector()
+		return
+	}
+
 	if strings.HasPrefix(message, "resize:") {
 		if !f.mainWindow.IsFullScreen() {
 			sl := strings.Split(message, ":")
@@ -406,12 +444,24 @@ func (f *Frontend) processMessage(message string) {
 	if message == "runtime:ready" {
 		cmd := fmt.Sprintf(
 			"window.wails.setCSSDragProperties('%s', '%s');\n"+
-				"window.wails.flags.deferDragToMouseMove = true;", f.frontendOptions.CSSDragProperty, f.frontendOptions.CSSDragValue)
+				"window.wails.setCSSDropProperties('%s', '%s');\n"+
+				"window.wails.flags.deferDragToMouseMove = true;",
+			f.frontendOptions.CSSDragProperty,
+			f.frontendOptions.CSSDragValue,
+			f.frontendOptions.DragAndDrop.CSSDropProperty,
+			f.frontendOptions.DragAndDrop.CSSDropValue,
+		)
+
 		f.ExecJS(cmd)
 
 		if f.frontendOptions.Frameless && f.frontendOptions.DisableResize == false {
 			f.ExecJS("window.wails.flags.enableResize = true;")
 		}
+
+		if f.frontendOptions.DragAndDrop.EnableFileDrop {
+			f.ExecJS("window.wails.flags.enableWailsDragAndDrop = true;")
+		}
+
 		return
 	}
 
@@ -437,7 +487,11 @@ func (f *Frontend) processMessage(message string) {
 }
 
 func (f *Frontend) Callback(message string) {
-	f.ExecJS(`window.wails.Callback(` + strconv.Quote(message) + `);`)
+	escaped, err := json.Marshal(message)
+	if err != nil {
+		panic(err)
+	}
+	f.ExecJS(`window.wails.Callback(` + string(escaped) + `);`)
 }
 
 func (f *Frontend) startDrag() {
@@ -461,50 +515,24 @@ func processMessage(message *C.char) {
 	messageBuffer <- goMessage
 }
 
-var requestBuffer = make(chan unsafe.Pointer, 100)
+var requestBuffer = make(chan webview.Request, 100)
 
 func (f *Frontend) startRequestProcessor() {
 	for request := range requestBuffer {
-		f.processRequest(request)
-		C.g_object_unref(C.gpointer(request))
+		f.assets.ServeWebViewRequest(request)
 	}
 }
 
 //export processURLRequest
 func processURLRequest(request unsafe.Pointer) {
-	// Increment reference counter to allow async processing, will be decremented after the processing
-	// has been finished by a worker.
-	C.g_object_ref(C.gpointer(request))
-	requestBuffer <- request
+	requestBuffer <- webview.NewRequest(request)
 }
 
-func (f *Frontend) processRequest(request unsafe.Pointer) {
-	req := (*C.WebKitURISchemeRequest)(request)
-	uri := C.webkit_uri_scheme_request_get_uri(req)
-	goURI := C.GoString(uri)
-
-	rw := &webKitResponseWriter{req: req}
-	defer rw.Close()
-
-	f.assets.ProcessHTTPRequestLegacy(
-		rw,
-		func() (*http.Request, error) {
-			method := webkit_uri_scheme_request_get_http_method(req)
-			r, err := http.NewRequest(method, goURI, nil)
-			if err != nil {
-				return nil, err
-			}
-			r.Header = webkit_uri_scheme_request_get_http_headers(req)
-
-			if r.URL.Host != f.startURL.Host {
-				if r.Body != nil {
-					r.Body.Close()
-				}
-
-				return nil, fmt.Errorf("Expected host '%s' in request, but was '%s'", f.startURL.Host, r.URL.Host)
-			}
-
-			return r, nil
-		})
-
+func (f *Frontend) startSecondInstanceProcessor() {
+	for secondInstanceData := range secondInstanceBuffer {
+		if f.frontendOptions.SingleInstanceLock != nil &&
+			f.frontendOptions.SingleInstanceLock.OnSecondInstanceLaunch != nil {
+			f.frontendOptions.SingleInstanceLock.OnSecondInstanceLaunch(secondInstanceData)
+		}
+	}
 }

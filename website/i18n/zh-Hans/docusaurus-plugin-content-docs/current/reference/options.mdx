@@ -50,15 +50,30 @@ func main() {
         OnBeforeClose:      app.beforeClose,
         CSSDragProperty:   "--wails-draggable",
         CSSDragValue:      "drag",
-        ZoomFactor:           1.0,
-        IsZoomControlEnabled: false,
+        EnableDefaultContextMenu: false,
+        EnableFraudulentWebsiteDetection: false,
         Bind: []interface{}{
             app,
+        },
+        EnumBind: []interface{}{
+            AllWeekdays,
+        },
+        ErrorFormatter: func(err error) any { return err.Error() },
+        SingleInstanceLock: &options.SingleInstanceLock{
+          UniqueId:               "c9c8fd93-6758-4144-87d1-34bdb0a8bd60",
+          OnSecondInstanceLaunch: app.onSecondInstanceLaunch,
+        },
+        DragAndDrop: &options.DragAndDrop{
+          EnableFileDrop:       false,
+          DisableWebViewDrop:   false,
+          CSSDropProperty:      "--wails-drop-target",
+          CSSDropValue:         "drop",
         },
         Windows: &windows.Options{
             WebviewIsTransparent:              false,
             WindowIsTranslucent:               false,
             BackdropType:                      windows.Mica,
+            DisablePinchZoom:               false,
             DisableWindowIcon:                 false,
             DisableFramelessWindowDecorations: false,
             WebviewUserDataPath:               "",
@@ -72,12 +87,18 @@ func main() {
                 LightModeTitleText: windows.RGB(20, 20, 20),
                 LightModeBorder:    windows.RGB(200, 200, 200),
             },
+            // ZoomFactor is the zoom factor for the WebView2. 这是匹配 Edge 用户激活放大或缩小的选项
+            ZoomFactor:           float64,
+            // IsZoomControlEnabled enables the zoom factor to be changed by the user.
+            IsZoomControlEnabled: bool,
             // User messages that can be customised
-            Messages *windows.Messages
+            Messages: *windows.Messages
             // OnSuspend is called when Windows enters low power mode
-            OnSuspend func()
+            OnSuspend: func()
             // OnResume is called when Windows resumes from low power mode
-            OnResume func()
+            OnResume: func(),
+            // Disable GPU hardware acceleration for the webview
+            WebviewGpuDisabled: false,
         },
         Mac: &mac.Options{
             TitleBar: &mac.TitleBar{
@@ -87,6 +108,8 @@ func main() {
                 FullSizeContent:            false,
                 UseToolbar:                 false,
                 HideToolbarSeparator:       true,
+                OnFileOpen: app.onFileOpen,
+                      OnUrlOpen:  app.onUrlOpen,
             },
             Appearance:           mac.NSAppearanceNameDarkAqua,
             WebviewIsTransparent: true,
@@ -100,6 +123,8 @@ func main() {
         Linux: &linux.Options{
             Icon: icon,
             WindowIsTranslucent: false,
+            WebviewGpuPolicy: linux.WebviewGpuPolicyAlways,
+            ProgramName: "wails"
         },
         Debug: options.Debug{
             OpenInspectorOnStartup: false,
@@ -231,12 +256,12 @@ func main() {
 | PATCH                   | ✅   | ✅   | ✅ [^1] |
 | DELETE                  | ✅   | ✅   | ✅ [^1] |
 | Request Headers         | ✅   | ✅   | ✅ [^1] |
-| Request Body            | ✅   | ✅   | ❌      |
-| Request Body Streaming  | ❌   | ❌   | ❌      |
+| Request Body            | ✅   | ✅   | ✅ [^2] |
+| Request Body Streaming  | ✅   | ✅   | ✅ [^2] |
 | Response StatusCodes    | ✅   | ✅   | ✅ [^1] |
 | Response Headers        | ✅   | ✅   | ✅ [^1] |
 | Response Body           | ✅   | ✅   | ✅      |
-| Response Body Streaming | ❌   | ❌   | ✅      |
+| Response Body Streaming | ❌   | ✅   | ✅      |
 | WebSockets              | ❌   | ❌   | ❌      |
 | HTTP Redirects 30x      | ✅   | ❌   | ❌      |
 
@@ -260,6 +285,12 @@ func main() {
 
 - GET 请求: `http.StatusNotFound`
 - 其他请求: `http.StatusMethodNotAllowed`
+
+:::info
+
+This does not work with vite v5.0.0+ and wails v2 due to changes in vite. Changes are planned in v3 to support similar functionality under vite v5.0.0+. If you need this feature, stay with vite v4.0.0+. See [issue 3240](https://github.com/wailsapp/wails/issues/3240) for details
+
+:::
 
 注意：当与前端 DevServer 结合使用时，可能会有一些限制，例如。 Vite 在不包含文件扩展名的每个路径上提供 index.html。
 
@@ -356,23 +387,110 @@ func (b *App) beforeClose(ctx context.Context) (prevent bool) {
 
 名称：CSSDragValue<br/> 类型：`string`
 
-### 缩放比例
+### EnableDefaultContextMenu
 
-名称：ZoomFactor<br/> 类型：`float64`
+EnableDefaultContextMenu enables the browser's default context-menu in production.
 
-这定义了 WebView2 的缩放比例。 这是匹配 Edge 用户激活放大或缩小的选项
+By default, the browser's default context-menu is only available in development and in a `-debug` [build](../reference/cli.mdx#build) along with the devtools inspector, Using this option you can enable the default context-menu in `production` while the devtools inspector won't be available unless the `-devtools` build flag is used.
 
-### 启用缩放比例
+When this option is enabled, by default the context-menu will only be shown for text contexts (where Cut/Copy/Paste is needed), to override this behavior, you can use the CSS property `--default-contextmenu` on any HTML element (including the `body`) with the following values :
 
-名称：IsZoomControlEnabled<br/> 类型：`bool`
+| CSS Style                      | Behavior                                                                                                                                                |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--default-contextmenu: auto;` | (**default**) will show the default context menu only if :<br/> contentEditable is true OR text has been selected OR element is input or textarea |
+| `--default-contextmenu: show;` | will always show the default context menu                                                                                                               |
+| `--default-contextmenu: hide;` | will always hide the default context menu                                                                                                               |
 
-这将允许用户更改缩放比例。 请注意，可以在选项中设置缩放比例，但不允许在运行时更改它。 适用于屏幕固定的或类似的应用程序。
+This rule is inherited like any normal CSS rule, so nesting works as expected.
+
+:::note
+This filtering functionality is only enabled in production, so in development and in debug build, the full context-menu is always available everywhere.
+:::
+
+:::warning
+This filtering functionality is NOT a security measure, the developer should expect that the full context-menu could be leaked anytime which could contain commands like (Download image, Reload, Save webpage), if this is a concern, the developer SHOULD NOT enable the default context-menu.
+:::
+
+
+Name: EnableDefaultContextMenu<br/> Type: `bool`
+
+### 启用欺诈网站检测
+
+EnableFraudulentWebsiteDetection 启用针对欺诈内容（例如恶意软件或网络钓鱼尝试）的扫描服务。 这些服务可能会从你的应用中发送信息，比如导航到苹果和微软的云服务的url和其他内容。
+
+名称：EnableFraudulentWebsiteDetection<br/> 类型：`bool`
 
 ### 绑定
 
 定义需要绑定到前端的方法的结构实例切片。
 
 名称：Bind<br/> 类型：`[]interface{}`
+
+### EnumBind
+
+A slice of Enum arrays that need to be bound to the frontend.
+
+Name: EnumBind<br/> Type: `[]interface{}`
+
+### ErrorFormatter
+
+A function that determines how errors are formatted when returned by a JS-to-Go method call. The returned value will be marshalled as JSON.
+
+Name: ErrorFormatter<br/> Type: `func (error) any`
+
+### SingleInstanceLock
+
+Enables single instance locking. This means that only one instance of your application can be running at a time.
+
+Name: SingleInstanceLock<br/> Type: `*options.SingleInstanceLock`
+
+#### UniqueId
+
+This id is used to generate the mutex name on Windows and macOS and the dbus name on Linux. Use a UUID to ensure that the id is unique.
+
+Name: UniqueId<br/> Type: `string`
+
+#### OnSecondInstanceLaunch
+
+Callback that is called when a second instance of your app is launched.
+
+Name: OnSecondInstanceLaunch<br/> Type: `func(secondInstanceData SecondInstanceData)`
+
+### Drag and Drop
+
+Defines the behavior of drag and drop events on the window.
+
+Name: DragAndDrop<br/> Type: `options.DragAndDrop`
+
+#### EnableFileDrop
+
+EnableFileDrop enables wails' drag and drop functionality that returns the dropped in files' absolute paths.
+
+When it is set to `true` the [runtime methods](../reference/runtime/draganddrop.mdx) can be used. <br/> Or you can listen for the `wails:file-drop` event with [runtime EventsOn method](../reference/runtime/events.mdx#eventson) both on the Javascript and GO side to implement any functionality you would like.
+
+The event returns the coordinates of the drop and a file path slice.
+
+Name: EnableFileDrop<br/> Type: `bool`<br/> Default: `false`
+
+#### DisableWebViewDrop
+
+Disables the webview's drag and drop functionality.
+
+It can be used to prevent accidental opening of dragged in files in the webview, when there is no need for drag and drop.
+
+Name: DisableWebViewDrop<br/> Type: `bool`<br/> Default: `false`
+
+#### CSSDropProperty
+
+CSS property to test for drag and drop target elements.
+
+Name: CSSDropProperty<br/> Type: `string`<br/> Default: `--wails-drop-target`
+
+#### CSSDropValue
+
+The CSS Value that the CSSDropProperty must have to be a valid drop target. Default "drop"
+
+Name: CSSDropValue<br/> Type: `string`<br/> Default: `drop`
 
 ### Windows
 
@@ -415,6 +533,24 @@ func (b *App) beforeClose(ctx context.Context) (prevent bool) {
 | Acrylic | 使用 [亚克力](https://learn.microsoft.com/en-us/windows/apps/design/style/acrylic) 效果 |
 | Mica    | 使用 [Mica](https://learn.microsoft.com/en-us/windows/apps/design/style/mica) 效果   |
 | Tabbed  | 使用 Tabbed。 这是一个类似于 Mica 的背景。                                                     |
+
+#### 缩放比例
+
+名称：ZoomFactor<br/> 类型：`float64`
+
+这定义了 WebView2 的缩放比例。 这是匹配 Edge 用户激活放大或缩小的选项
+
+#### 启用缩放比例
+
+名称：IsZoomControlEnabled<br/> 类型：`bool`
+
+这将允许用户更改缩放比例。 请注意，可以在选项中设置缩放比例，但不允许在运行时更改它。 适用于屏幕固定的或类似的应用程序。
+
+#### DisablePinchZoom
+
+Setting this to `true` will disable pinch zoom gestures.
+
+Name: DisablePinchZoom<br/> Type: `bool`
 
 #### 禁用窗口图标
 
@@ -542,6 +678,18 @@ ResizeDebounceMS 是调整窗口大小时去抖动 webview2 重绘的时间量�
 
 名称：OnResume<br/> 类型：`func()`
 
+#### 禁用 Webview GPU 硬件加速
+
+设置为 `true` 将禁用 webview 的 GPU 硬件加速。
+
+名称：WebviewGpuIsDisabled<br/> 类型：`bool`
+
+#### EnableSwipeGestures
+
+Setting this to `true` will enable swipe gestures for the webview.
+
+Name: EnableSwipeGestures<br/> Type: `bool`
+
 ### Mac
 
 这定义了 [Mac 特定的选项](#mac)。
@@ -636,6 +784,54 @@ Mac: &mac.Options{
 将此设置为 `true` 将使窗口半透明。 通常与[Webview 透明](#webview-透明) 结合使用以制作冰霜效果的应用程序。
 
 名称：WindowIsTranslucent<br/> 类型：`bool`
+
+#### OnFileOpen
+
+Callback that is called when a file is opened with the application.
+
+Name: OnFileOpen<br/> Type: `func(filePath string)`
+
+#### OnUrlOpen
+
+Callback that is called when a URL is opened with the application.
+
+Name: OnUrlOpen<br/> Type: `func(filePath string)`
+
+#### Preferences
+
+The Preferences struct provides the ability to configure the Webview preferences.
+
+Name: Preferences<br/> Type: [`*mac.Preferences`](#preferences-struct)
+
+##### Preferences struct
+
+You can specify the webview preferences.
+
+```go
+type Preferences struct {
+    TabFocusesLinks        u.Bool
+    TextInteractionEnabled u.Bool
+    FullscreenEnabled      u.Bool
+}
+```
+
+| 设置                     | 描述                                                                                                                                                                                                                           |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| TabFocusesLinks        | A Boolean value that indicates whether pressing the tab key changes the focus to links and form controls. [Apple Docs](https://developer.apple.com/documentation/webkit/wkpreferences/2818595-tabfocuseslinks?language=objc) |
+| TextInteractionEnabled | A Boolean value that indicates whether to allow people to select or otherwise interact with text. [Apple Docs](https://developer.apple.com/documentation/webkit/wkpreferences/3727362-textinteractionenabled?language=objc)  |
+| FullscreenEnabled      | A Boolean value that indicates whether a web view can display content full screen. [Apple Docs](https://developer.apple.com/documentation/webkit/wkpreferences/3917769-elementfullscreenenabled?language=objc)               |
+
+示例：
+
+```go
+Mac: &mac.Options{
+    Preferences: &mac.Preferences{
+        TabFocusesLinks:        mac.Enabled,
+        TextInteractionEnabled: mac.Disabled,
+        FullscreenEnabled:      mac.Enabled,
+    }
+}
+```
 
 #### 关于
 
@@ -738,6 +934,28 @@ func main() {
 
 名称：WindowIsTranslucent<br/> 类型：`bool`
 
+#### Webview GPU 策略
+
+该选项用于决定 webview 的硬件加速策略。
+
+名称：WebviewGpuPolicy<br/> 类型：[`options.WebviewGpuPolicy`](#webviewgpupolicy-type)<br/> 默认：`WebviewGpuPolicyAlways`
+
+##### Webview GPU 策略类型
+
+| 值                        | 描述                    |
+| ------------------------ | --------------------- |
+| WebviewGpuPolicyAlways   | 始终启用硬件加速              |
+| WebviewGpuPolicyOnDemand | 根据 Web 内容的请求启用/禁用硬件加速 |
+| WebviewGpuPolicyNever    | 硬件加速始终处于禁用状态          |
+
+#### ProgramName
+
+This option is used to set the program's name for the window manager via GTK's g_set_prgname(). This name should not be localized, [see the docs](https://docs.gtk.org/glib/func.set_prgname.html).
+
+When a .desktop file is created this value helps with window grouping and desktop icons when the .desktop file's `Name` property differs form the executable's filename.
+
+Name: ProgramName<br/> Type: string<br/>
+
 ### 调试
 
 这定义了用于调试构建的 [调试特定选项](#调试)。
@@ -751,3 +969,4 @@ func main() {
 名称: OpenInspectorOnStartup<br/> 类型: `bool`
 
 [^1]: 这需要 WebKit2GTK 2.36+ 支持，并且您的应用程序需要使用构建标签 `webkit2_36` 来构建以激活对此功能的支持。 这也会将您应用程序的 WebKit2GTK 最低要求提高到 2.36。
+[^2]: 这需要 WebKit2GTK 2.40+ 支持，并且您的应用程序需要使用构建标签 `webkit2_40` 来构建以激活对此功能的支持。 这也将您的应用程序的 WebKit2GTK 最低要求提高到 2.40。
