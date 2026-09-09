@@ -17,6 +17,7 @@ After processing, the content will be moved to the main changelog and this file 
 
 ## Added
 <!-- New features, capabilities, or enhancements -->
+- Gate private macOS APIs behind build tags for opt-in usage — see [documentation](https://v3.wails.io/features/browser/integration) and [documentation](https://v3.wails.io/features/environment/info) and [documentation](https://v3.wails.io/features/windows/basics) and [documentation](https://v3.wails.io/features/windows/frameless) and [documentation](https://v3.wails.io/features/windows/notch-windows) and [documentation](https://v3.wails.io/features/windows/options) and [documentation](https://v3.wails.io/guides/build/macos) and [documentation](https://v3.wails.io/guides/build/private-macos-apis) and [documentation](https://v3.wails.io/reference/overview) in [PR](https://github.com/wailsapp/wails/pull/6087) by @leaanthony
 
 ## Changed
 <!-- Changes in existing functionality -->
